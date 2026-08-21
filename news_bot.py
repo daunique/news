@@ -71,7 +71,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TELEGRAM_B
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PASTE_YOUR_TELEGRAM_CHAT_ID").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "PASTE_YOUR_GROQ_API_KEY").strip()
 
-GROQ_MODEL = "llama-3.3-70b-versatile"    # free tier, no card required
+GROQ_MODEL = "openai/gpt-oss-120b"        # free tier, no card required
 GROQ_MIN_SECONDS_BETWEEN_CALLS = 2.5      # keeps us safely under the ~30/min free cap
 
 ENTRIES_PER_FEED_CHECKED = 15   # newest N entries looked at per feed each run
@@ -276,4 +276,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-                   
