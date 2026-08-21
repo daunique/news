@@ -1,0 +1,44 @@
+name: Breaking News Monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 minutes -- GitHub's free-tier-friendly floor
+  workflow_dispatch:          # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit seen_articles.json back
+
+jobs:
+  check-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run news bot
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python news_bot.py
+
+      - name: Save seen-articles state
+        run: |
+          if [ -n "$(git status --porcelain seen_articles.json)" ]; then
+            git config user.name "news-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add seen_articles.json
+            git commit -m "Update seen articles [skip ci]"
+            git push
+          else
+            echo "No new articles to record this run."
+          fi
+          
