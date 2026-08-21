@@ -232,6 +232,12 @@ def run():
         if not val or val.startswith("PASTE_YOUR_"):
             raise SystemExit(f"[!] {name} is missing or empty -- check it's saved as a repo secret with that exact name.")
 
+    if os.environ.get("TEST_TELEGRAM") == "true":
+        send_telegram("\u2705 Test message from the news bot -- if you see this, Telegram delivery is working.")
+        print(f"[{datetime.now()}] Sent Telegram test message, skipping feed check.")
+        return
+
+
     seen = load_seen()
     total_feeds = sum(len(v) for v in FEEDS.values())
     print(f"[{datetime.now()}] Checking {total_feeds} feeds across {len(FEEDS)} categories...")
@@ -276,3 +282,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+   
