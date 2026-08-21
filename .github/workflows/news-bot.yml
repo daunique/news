@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '*/15 * * * *'   # every 15 minutes -- GitHub's free-tier-friendly floor
   workflow_dispatch:          # lets you trigger a run manually from the Actions tab
+    inputs:
+      test_telegram:
+        description: 'Send a one-off Telegram test message instead of checking feeds'
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # needed so the workflow can commit seen_articles.json back
@@ -28,6 +33,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_TELEGRAM: ${{ github.event.inputs.test_telegram }}
         run: python news_bot.py
 
       - name: Save seen-articles state
@@ -42,3 +48,4 @@ jobs:
           else
             echo "No new articles to record this run."
           fi
+          
