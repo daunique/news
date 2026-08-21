@@ -67,9 +67,9 @@ import os
 from datetime import datetime
 
 # ============================ CONFIG ================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PASTE_YOUR_TELEGRAM_CHAT_ID")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "PASTE_YOUR_GROQ_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TELEGRAM_BOT_TOKEN").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PASTE_YOUR_TELEGRAM_CHAT_ID").strip()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "PASTE_YOUR_GROQ_API_KEY").strip()
 
 GROQ_MODEL = "llama-3.3-70b-versatile"    # free tier, no card required
 GROQ_MIN_SECONDS_BETWEEN_CALLS = 2.5      # keeps us safely under the ~30/min free cap
@@ -229,8 +229,8 @@ def run():
     for name, val in [("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
                        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
                        ("GROQ_API_KEY", GROQ_API_KEY)]:
-        if val.startswith("PASTE_YOUR_"):
-            raise SystemExit(f"[!] Set {name} before running -- see the setup notes at the top of this file.")
+        if not val or val.startswith("PASTE_YOUR_"):
+            raise SystemExit(f"[!] {name} is missing or empty -- check it's saved as a repo secret with that exact name.")
 
     seen = load_seen()
     total_feeds = sum(len(v) for v in FEEDS.values())
@@ -276,3 +276,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+                   
