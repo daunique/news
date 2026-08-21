@@ -126,15 +126,40 @@ def article_id(entry):
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def extract_image(entry):
+CATEGORY_PLACEHOLDER = {
+    "finance": "https://placehold.co/1200x630/1a3c34/ffffff?text=FINANCE",
+    "crypto": "https://placehold.co/1200x630/2d2140/ffffff?text=CRYPTO",
+    "ai": "https://placehold.co/1200x630/1e2a4a/ffffff?text=AI",
+    "international": "https://placehold.co/1200x630/3a1f1f/ffffff?text=WORLD",
+}
+
+
+def fetch_og_image(article_url):
+    """Best-effort fetch of an article page's og:image meta tag, for feed
+    entries that don't embed one directly."""
+    try:
+        resp = requests.get(article_url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        match = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            resp.text, re.IGNORECASE,
+        ) or re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            resp.text, re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+    except requests.RequestException:
+        return None
+
+
+def extract_image(entry, category, link):
     if entry.get("media_thumbnail"):
         return entry["media_thumbnail"][0].get("url")
     if entry.get("media_content"):
         return entry["media_content"][0].get("url")
-    for link in entry.get("links", []):
-        if str(link.get("type", "")).startswith("image"):
-            return link.get("href")
-    return None
+    for l in entry.get("links", []):
+        if str(l.get("type", "")).startswith("image"):
+            return l.get("href")
+    return fetch_og_image(link) or CATEGORY_PLACEHOLDER.get(category)
 
 
 _last_groq_call = 0.0  # tracks pacing between API calls, keeps us under the free rate limit
@@ -271,7 +296,7 @@ def run():
                     continue
 
                 if result.get("significant") and result.get("headline"):
-                    image = extract_image(entry)
+                    image = extract_image(entry, category, link)
                     message = f"{result['label']}: {result['headline']}\n\nSource: {link}"
                     send_telegram(message, image)
                     print(f"[{datetime.now()}] Notified ({category}): {result['label']}: {result['headline']}")
@@ -282,4 +307,4 @@ def run():
 
 if __name__ == "__main__":
     run()
-   
+       
