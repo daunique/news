@@ -93,14 +93,18 @@ FEEDS = {
     "finance": [
         "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # CNBC Top News
         "https://finance.yahoo.com/news/rssindex",                 # Yahoo Finance
+        "https://www.investing.com/rss/news_14.rss",                # Investing.com Economy
     ],
     "crypto": [
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "https://cointelegraph.com/rss",
+        "https://decrypt.co/feed",
+        "https://cryptoslate.com/feed",
     ],
     "ai": [
         "https://techcrunch.com/category/artificial-intelligence/feed/",
         "https://venturebeat.com/category/ai/feed/",
+        "https://arstechnica.com/ai/feed",
     ],
     "international": [
         "http://feeds.bbci.co.uk/news/world/rss.xml",
@@ -329,4 +333,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-    
