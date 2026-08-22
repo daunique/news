@@ -318,7 +318,8 @@ def run():
 
                 if result.get("significant") and result.get("headline"):
                     image = extract_image(entry, category, link)
-                    message = f"{result['label']}: {result['headline']}\n\nSource: {link}"
+                    post_text = f"{result['label']}: {result['headline']}"
+                    message = f"{post_text}\n\n(reply with source: {link})"
                     send_telegram(message, image)
                     print(f"[{datetime.now()}] Notified ({category}): {result['label']}: {result['headline']}")
 
@@ -328,4 +329,4 @@ def run():
 
 if __name__ == "__main__":
     run()
-       
+    
