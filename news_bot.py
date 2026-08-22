@@ -62,6 +62,7 @@ import requests
 import json
 import re
 import time
+import calendar
 import hashlib
 import os
 from datetime import datetime
@@ -77,6 +78,9 @@ GROQ_MIN_SECONDS_BETWEEN_CALLS = 2.5      # keeps us safely under the ~30/min fr
 ENTRIES_PER_FEED_CHECKED = 15   # newest N entries looked at per feed each run
                                  # (higher than a continuous-poller needs, since
                                  # this only runs once per schedule interval)
+MAX_ARTICLE_AGE_HOURS = 24       # skip anything older than this, so alerts stay
+                                  # same-day -- lower this (e.g. to 6) for a
+                                  # tighter "right now" feel
 SEEN_FILE = "seen_articles.json"
 
 VALID_LABELS = ["BREAKING", "JUST IN", "DEVELOPING", "UPDATE", "NEW"]
@@ -124,6 +128,17 @@ def save_seen(seen):
 def article_id(entry):
     key = entry.get("link") or entry.get("title", "")
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def article_age_hours(entry):
+    """Hours since the article's own published/updated timestamp. Returns
+    None if the feed entry doesn't carry a parseable date -- in that case
+    we let it through rather than risk dropping something genuinely fresh."""
+    struct = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not struct:
+        return None
+    published_ts = calendar.timegm(struct)  # feedparser normalizes this to UTC
+    return (time.time() - published_ts) / 3600
 
 
 CATEGORY_PLACEHOLDER = {
@@ -262,7 +277,6 @@ def run():
         print(f"[{datetime.now()}] Sent Telegram test message, skipping feed check.")
         return
 
-
     seen = load_seen()
     total_feeds = sum(len(v) for v in FEEDS.values())
     print(f"[{datetime.now()}] Checking {total_feeds} feeds across {len(FEEDS)} categories...")
@@ -281,19 +295,26 @@ def run():
                 aid = article_id(entry)
                 if aid in seen:
                     continue
-                seen.add(aid)
 
                 title = entry.get("title", "")
                 summary = re.sub("<[^<]+?>", "", entry.get("summary", ""))[:500]  # strip HTML tags
                 link = entry.get("link", "")
                 if not title:
+                    seen.add(aid)  # never usable -- fine to permanently skip
+                    continue
+
+                age_hours = article_age_hours(entry)
+                if age_hours is not None and age_hours > MAX_ARTICLE_AGE_HOURS:
+                    seen.add(aid)  # too old, and it won't get fresher -- permanently skip
                     continue
 
                 try:
                     result = analyze_and_draft(category, title, summary)
                 except Exception as e:
                     print(f"[!] Analysis failed for '{title[:60]}': {e}")
-                    continue
+                    continue  # NOT marked seen -- retried automatically next run
+
+                seen.add(aid)  # mark seen only once we actually have a verdict
 
                 if result.get("significant") and result.get("headline"):
                     image = extract_image(entry, category, link)
