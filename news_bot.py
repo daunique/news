@@ -82,6 +82,8 @@ MAX_ARTICLE_AGE_HOURS = 24       # skip anything older than this, so alerts stay
                                   # same-day -- lower this (e.g. to 6) for a
                                   # tighter "right now" feel
 SEEN_FILE = "seen_articles.json"
+RECENT_HEADLINES_FILE = "recent_headlines.json"
+DUPLICATE_WINDOW_HOURS = 8   # how long a story counts as "already covered," across sources
 
 VALID_LABELS = ["BREAKING", "JUST IN", "DEVELOPING", "UPDATE", "NEW"]
 
@@ -94,12 +96,15 @@ FEEDS = {
         "https://www.cnbc.com/id/100003114/device/rss/rss.html",  # CNBC Top News
         "https://finance.yahoo.com/news/rssindex",                 # Yahoo Finance
         "https://www.investing.com/rss/news_14.rss",                # Investing.com Economy
+        "https://www.investing.com/rss/news_1.rss",                 # Investing.com Forex/currencies
+        "https://oilprice.com/rss/main",                            # OilPrice.com - energy & geopolitics
     ],
     "crypto": [
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "https://cointelegraph.com/rss",
         "https://decrypt.co/feed",
         "https://cryptoslate.com/feed",
+        "https://blockworks.co/feed/",                              # institutional/macro crypto angle
     ],
     "ai": [
         "https://techcrunch.com/category/artificial-intelligence/feed/",
@@ -127,6 +132,26 @@ def load_seen():
 def save_seen(seen):
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen)[-3000:], f)  # keep the file bounded
+
+
+def load_recent_headlines():
+    """Headlines already sent within the dedup window, regardless of which
+    feed/source they came from -- used to stop two outlets covering the same
+    underlying story from both triggering a notification."""
+    if not os.path.exists(RECENT_HEADLINES_FILE):
+        return []
+    try:
+        with open(RECENT_HEADLINES_FILE) as f:
+            items = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+    cutoff = time.time() - DUPLICATE_WINDOW_HOURS * 3600
+    return [i for i in items if i.get("ts", 0) > cutoff]
+
+
+def save_recent_headlines(items):
+    with open(RECENT_HEADLINES_FILE, "w") as f:
+        json.dump(items[-100:], f)  # keep it bounded
 
 
 def article_id(entry):
@@ -184,12 +209,14 @@ def extract_image(entry, category, link):
 _last_groq_call = 0.0  # tracks pacing between API calls, keeps us under the free rate limit
 
 
-def analyze_and_draft(category, title, summary):
+def analyze_and_draft(category, title, summary, recent_headlines):
     """Ask the model: is this genuinely significant, and if so, draft the alert."""
     global _last_groq_call
     wait = GROQ_MIN_SECONDS_BETWEEN_CALLS - (time.time() - _last_groq_call)
     if wait > 0:
         time.sleep(wait)
+
+    recent_block = "\n".join(f"- {h}" for h in recent_headlines) or "(none)"
 
     prompt = f"""You are screening for a fast-moving breaking-news account covering {category}.
 
@@ -199,6 +226,12 @@ Summary: {summary}
 Decide if this is genuinely significant, breaking news -- major market-moving,
 geopolitical, or industry-defining. Be selective: reject routine, minor, or
 speculative stories. Most articles should be rejected.
+
+Headlines already sent in the last {DUPLICATE_WINDOW_HOURS} hours -- if this
+article covers the same underlying story or event as any of these (even from
+a different source, with different wording), set significant to false even
+if it would otherwise qualify:
+{recent_block}
 
 Output ONLY this JSON shape, nothing else:
 {{"significant": true or false, "label": "...", "headline": "..."}}
@@ -213,8 +246,12 @@ If significant is true:
     UPDATE      a real development on a story that's already ongoing
     NEW         notable but not urgent (a launch, a report, a filing)
 - "headline" is a punchy, strictly factual 1-2 sentence summary under 250
-  characters, with one fitting emoji. Do not editorialize or exaggerate
-  beyond what the source supports.
+  characters. Only start it with an emoji when there's a clear country or
+  nationality angle -- one or two flag emoji for the country/countries
+  directly involved (e.g. "🇮🇷 Iran's currency crashes..." or "🇺🇸🇮🇷 Treasury
+  Secretary..."). Most headlines should have NO emoji at all -- don't add a
+  flag just to have one, and never use generic symbolic emoji like 🚨 or 📈.
+  Do not editorialize or exaggerate beyond what the source supports.
 If significant is false, set label and headline to empty strings."""
 
     resp = requests.post(
@@ -282,6 +319,7 @@ def run():
         return
 
     seen = load_seen()
+    recent = load_recent_headlines()
     total_feeds = sum(len(v) for v in FEEDS.values())
     print(f"[{datetime.now()}] Checking {total_feeds} feeds across {len(FEEDS)} categories...")
 
@@ -313,7 +351,7 @@ def run():
                     continue
 
                 try:
-                    result = analyze_and_draft(category, title, summary)
+                    result = analyze_and_draft(category, title, summary, [r["headline"] for r in recent])
                 except Exception as e:
                     print(f"[!] Analysis failed for '{title[:60]}': {e}")
                     continue  # NOT marked seen -- retried automatically next run
@@ -326,10 +364,13 @@ def run():
                     message = f"{post_text}\n\n(reply with source: {link})"
                     send_telegram(message, image)
                     print(f"[{datetime.now()}] Notified ({category}): {result['label']}: {result['headline']}")
+                    recent.append({"headline": result["headline"], "ts": time.time()})
 
     save_seen(seen)
+    save_recent_headlines(recent)
     print(f"[{datetime.now()}] Run complete. Tracking {len(seen)} seen articles.")
 
 
 if __name__ == "__main__":
     run()
+                            
