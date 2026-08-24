@@ -38,10 +38,10 @@ jobs:
 
       - name: Save seen-articles state
         run: |
-          if [ -n "$(git status --porcelain seen_articles.json)" ]; then
+          if [ -n "$(git status --porcelain seen_articles.json recent_headlines.json)" ]; then
             git config user.name "news-bot"
             git config user.email "actions@users.noreply.github.com"
-            git add seen_articles.json
+            git add seen_articles.json recent_headlines.json
             git commit -m "Update seen articles [skip ci]"
             git pull --no-rebase -X ours origin main
             git push
