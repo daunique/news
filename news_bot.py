@@ -73,7 +73,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PASTE_YOUR_TELEGRAM_CHAT_
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "PASTE_YOUR_GROQ_API_KEY").strip()
 
 GROQ_MODEL = "openai/gpt-oss-120b"        # free tier, no card required
-GROQ_MIN_SECONDS_BETWEEN_CALLS = 2.5      # keeps us safely under the ~30/min free cap
+# Free tier for this model: 30 req/min, 1,000 req/day, 8,000 tokens/min, 200,000 tokens/day.
+# Token-per-minute is the binding constraint once the recent-headlines block is
+# included in every prompt, so pacing is more conservative than the RPM alone implies.
+GROQ_MIN_SECONDS_BETWEEN_CALLS = 4.5
+MAX_RECENT_HEADLINES_IN_PROMPT = 15   # bounds prompt size so token usage can't creep up over the day
 
 ENTRIES_PER_FEED_CHECKED = 15   # newest N entries looked at per feed each run
                                  # (higher than a continuous-poller needs, since
@@ -209,6 +213,33 @@ def extract_image(entry, category, link):
 _last_groq_call = 0.0  # tracks pacing between API calls, keeps us under the free rate limit
 
 
+def _groq_request(payload):
+    """POST to Groq, retrying once on a rate limit using its Retry-After header.
+    A long retry-after (over a minute) means we've likely hit the daily cap,
+    not just a per-minute burst -- in that case give up and let this article
+    get picked up on a later run instead of stalling the whole job."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "content-type": "application/json",
+    }
+    for attempt in range(2):
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers, json=payload, timeout=25,
+        )
+        if resp.status_code != 429:
+            return resp
+        try:
+            wait_s = float(resp.headers.get("Retry-After", ""))
+        except ValueError:
+            wait_s = 5.0
+        if wait_s > 60 or attempt == 1:
+            raise RuntimeError(f"Groq rate limited (retry-after {wait_s:.0f}s) -- deferring to next run")
+        print(f"[!] Groq rate limited, waiting {wait_s:.0f}s and retrying once...")
+        time.sleep(wait_s)
+    return resp
+
+
 def analyze_and_draft(category, title, summary, recent_headlines):
     """Ask the model: is this genuinely significant, and if so, draft the alert."""
     global _last_groq_call
@@ -216,7 +247,7 @@ def analyze_and_draft(category, title, summary, recent_headlines):
     if wait > 0:
         time.sleep(wait)
 
-    recent_block = "\n".join(f"- {h}" for h in recent_headlines) or "(none)"
+    recent_block = "\n".join(f"- {h}" for h in recent_headlines[-MAX_RECENT_HEADLINES_IN_PROMPT:]) or "(none)"
 
     prompt = f"""You are screening for a fast-moving breaking-news account covering {category}.
 
@@ -254,22 +285,14 @@ If significant is true:
   Do not editorialize or exaggerate beyond what the source supports.
 If significant is false, set label and headline to empty strings."""
 
-    resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "content-type": "application/json",
-        },
-        json={
-            "model": GROQ_MODEL,
-            "max_tokens": 300,
-            "messages": [
-                {"role": "system", "content": "You only output valid JSON. No prose, no markdown fences, no explanation."},
-                {"role": "user", "content": prompt},
-            ],
-        },
-        timeout=25,
-    )
+    resp = _groq_request({
+        "model": GROQ_MODEL,
+        "max_tokens": 300,
+        "messages": [
+            {"role": "system", "content": "You only output valid JSON. No prose, no markdown fences, no explanation."},
+            {"role": "user", "content": prompt},
+        ],
+    })
     _last_groq_call = time.time()
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"].strip()
@@ -373,4 +396,4 @@ def run():
 
 if __name__ == "__main__":
     run()
-                            
+   
