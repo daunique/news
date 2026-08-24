@@ -65,7 +65,7 @@ import time
 import calendar
 import hashlib
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ============================ CONFIG ================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TELEGRAM_BOT_TOKEN").strip()
@@ -88,6 +88,9 @@ MAX_ARTICLE_AGE_HOURS = 24       # skip anything older than this, so alerts stay
 SEEN_FILE = "seen_articles.json"
 RECENT_HEADLINES_FILE = "recent_headlines.json"
 DUPLICATE_WINDOW_HOURS = 8   # how long a story counts as "already covered," across sources
+DAILY_COUNT_FILE = "daily_count.json"
+MIN_DAILY_POSTS = 2          # for Facebook -- ensures at least this many posts even on quiet news days
+CATCHUP_GRACE_HOUR_UTC = 18  # start relaxing the significance bar from this hour (UTC) if still short
 
 VALID_LABELS = ["BREAKING", "JUST IN", "DEVELOPING", "UPDATE", "NEW"]
 
@@ -156,6 +159,25 @@ def load_recent_headlines():
 def save_recent_headlines(items):
     with open(RECENT_HEADLINES_FILE, "w") as f:
         json.dump(items[-100:], f)  # keep it bounded
+
+
+def load_daily_count():
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    data = {}
+    if os.path.exists(DAILY_COUNT_FILE):
+        try:
+            with open(DAILY_COUNT_FILE) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            data = {}
+    if data.get("date") != today:
+        return {"date": today, "count": 0}  # new day -- reset the counter
+    return data
+
+
+def save_daily_count(data):
+    with open(DAILY_COUNT_FILE, "w") as f:
+        json.dump(data, f)
 
 
 def article_id(entry):
@@ -240,8 +262,11 @@ def _groq_request(payload):
     return resp
 
 
-def analyze_and_draft(category, title, summary, recent_headlines):
-    """Ask the model: is this genuinely significant, and if so, draft the alert."""
+def analyze_and_draft(category, title, summary, recent_headlines, relaxed=False):
+    """Ask the model: is this genuinely significant, and if so, draft the alert.
+    relaxed=True is used for the end-of-day catch-up pass, when the daily
+    minimum hasn't been hit yet -- it lowers the bar so a solid-but-not-huge
+    story can still qualify, so there's something to post that day."""
     global _last_groq_call
     wait = GROQ_MIN_SECONDS_BETWEEN_CALLS - (time.time() - _last_groq_call)
     if wait > 0:
@@ -249,14 +274,25 @@ def analyze_and_draft(category, title, summary, recent_headlines):
 
     recent_block = "\n".join(f"- {h}" for h in recent_headlines[-MAX_RECENT_HEADLINES_IN_PROMPT:]) or "(none)"
 
+    if relaxed:
+        selectivity = ("Today hasn't produced enough major stories yet and a daily minimum "
+                        "needs filling. For THIS screening only, be notably more lenient: flag it "
+                        "significant if it's a real, solid, on-topic story -- it doesn't need to be "
+                        "dramatic, just genuinely newsworthy and accurate. Still reject pure filler, "
+                        "ads, or opinion pieces with no real news value. If flagged significant here, "
+                        "the label should almost always be NEW (or UPDATE for a development on an "
+                        "ongoing story) -- do not use BREAKING/JUST IN/DEVELOPING unless fully earned.")
+    else:
+        selectivity = ("Decide if this is genuinely significant, breaking news -- major "
+                        "market-moving, geopolitical, or industry-defining. Be selective: reject "
+                        "routine, minor, or speculative stories. Most articles should be rejected.")
+
     prompt = f"""You are screening for a fast-moving breaking-news account covering {category}.
 
 Article title: {title}
 Summary: {summary}
 
-Decide if this is genuinely significant, breaking news -- major market-moving,
-geopolitical, or industry-defining. Be selective: reject routine, minor, or
-speculative stories. Most articles should be rejected.
+{selectivity}
 
 Headlines already sent in the last {DUPLICATE_WINDOW_HOURS} hours -- if this
 article covers the same underlying story or event as any of these (even from
@@ -343,8 +379,10 @@ def run():
 
     seen = load_seen()
     recent = load_recent_headlines()
+    daily = load_daily_count()
     total_feeds = sum(len(v) for v in FEEDS.values())
-    print(f"[{datetime.now()}] Checking {total_feeds} feeds across {len(FEEDS)} categories...")
+    print(f"[{datetime.now()}] Checking {total_feeds} feeds across {len(FEEDS)} categories... "
+          f"({daily['count']}/{MIN_DAILY_POSTS} posted today)")
 
     for category, urls in FEEDS.items():
         for url in urls:
@@ -373,8 +411,10 @@ def run():
                     seen.add(aid)  # too old, and it won't get fresher -- permanently skip
                     continue
 
+                relaxed = (daily["count"] < MIN_DAILY_POSTS
+                           and datetime.now(timezone.utc).hour >= CATCHUP_GRACE_HOUR_UTC)
                 try:
-                    result = analyze_and_draft(category, title, summary, [r["headline"] for r in recent])
+                    result = analyze_and_draft(category, title, summary, [r["headline"] for r in recent], relaxed)
                 except Exception as e:
                     print(f"[!] Analysis failed for '{title[:60]}': {e}")
                     continue  # NOT marked seen -- retried automatically next run
@@ -386,12 +426,16 @@ def run():
                     post_text = f"{result['label']}: {result['headline']}"
                     message = f"{post_text}\n\n(reply with source: {link})"
                     send_telegram(message, image)
-                    print(f"[{datetime.now()}] Notified ({category}): {result['label']}: {result['headline']}")
+                    print(f"[{datetime.now()}] Notified ({category}){' [catch-up]' if relaxed else ''}: "
+                          f"{result['label']}: {result['headline']}")
                     recent.append({"headline": result["headline"], "ts": time.time()})
+                    daily["count"] += 1
 
     save_seen(seen)
     save_recent_headlines(recent)
-    print(f"[{datetime.now()}] Run complete. Tracking {len(seen)} seen articles.")
+    save_daily_count(daily)
+    print(f"[{datetime.now()}] Run complete. Tracking {len(seen)} seen articles. "
+          f"{daily['count']}/{MIN_DAILY_POSTS} posted today.")
 
 
 if __name__ == "__main__":
