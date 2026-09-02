@@ -67,6 +67,7 @@ import hashlib
 import os
 import io
 from datetime import datetime, timezone
+from urllib.parse import urljoin
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ============================ CONFIG ================================
@@ -218,7 +219,7 @@ def fetch_og_image(article_url):
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
             resp.text, re.IGNORECASE,
         )
-        return match.group(1) if match else None
+        return urljoin(article_url, match.group(1)) if match else None
     except requests.RequestException:
         return None
 
@@ -301,8 +302,12 @@ def build_card_image(image_url, label, headline, highlight, category):
     catch and fall back to the plain source image rather than lose the
     notification over a design step."""
     font_path = ensure_font()
-    bg_bytes = requests.get(image_url, timeout=10).content
-    bg = Image.open(io.BytesIO(bg_bytes)).convert("RGB")
+    resp = requests.get(image_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    content_type = resp.headers.get("Content-Type", "")
+    if not content_type.startswith("image/"):
+        raise ValueError(f"not an image (Content-Type: {content_type or 'unknown'})")
+    bg = Image.open(io.BytesIO(resp.content)).convert("RGB")
     bg = ImageOps.fit(bg, (CARD_W, CARD_H), method=Image.LANCZOS)
 
     gradient = Image.new("L", (1, CARD_H), 0)
@@ -561,7 +566,7 @@ def run():
                             card_bytes = build_card_image(
                                 image, result["label"], result["headline"], result.get("highlight", ""), category)
                         except Exception as e:
-                            print(f"[!] Card generation failed, sending plain image instead: {e}")
+                            print(f"[!] Card generation failed for {image}, sending plain image instead: {e}")
 
                     if card_bytes:
                         send_telegram(message, image_bytes=card_bytes)
