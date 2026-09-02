@@ -65,7 +65,9 @@ import time
 import calendar
 import hashlib
 import os
+import io
 from datetime import datetime, timezone
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ============================ CONFIG ================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_TELEGRAM_BOT_TOKEN").strip()
@@ -232,6 +234,122 @@ def extract_image(entry, category, link):
     return fetch_og_image(link) or CATEGORY_PLACEHOLDER.get(category)
 
 
+# ======================= BRANDED CARD IMAGE =======================
+# Turns the raw article image into a designed card: your photo as the
+# background, a dark gradient for legibility, your wordmark, a label pill,
+# and a bold word-wrapped headline with the key phrase picked out in your
+# accent color -- the same genre as Watcher.Guru/Bitcoin Magazine-style cards.
+BRAND_NAME = "APEX WIRE"          # <-- change this if you land on a different name
+CARD_W, CARD_H = 1080, 1920       # Facebook Story size; still reads fine in an X/FB feed
+BRAND_NAVY = (16, 26, 46)
+BRAND_AMBER = (251, 191, 36)
+CARD_WHITE = (255, 255, 255)
+
+FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf"
+FONT_PATH = "Anton-Regular.ttf"
+
+
+def ensure_font():
+    """Downloads the display font once and reuses it; falls back to PIL's
+    built-in font if the download ever fails, so a font hiccup never kills
+    a notification -- it just looks plainer."""
+    if os.path.exists(FONT_PATH):
+        return FONT_PATH
+    try:
+        r = requests.get(FONT_URL, timeout=15)
+        r.raise_for_status()
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+        return FONT_PATH
+    except requests.RequestException as e:
+        print(f"[!] Could not download display font, using a plainer fallback: {e}")
+        return None
+
+
+def _wrap_lines(draw, text, font, max_width):
+    words, lines, current = text.split(), [], []
+    for word in words:
+        trial = current + [word]
+        if draw.textlength(" ".join(trial), font=font) > max_width and current:
+            lines.append(current)
+            current = [word]
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _fit_headline(draw, text, font_path, max_width, max_height, start_size=64, min_size=38):
+    """Shrinks the font until the wrapped headline fits the available box,
+    so long headlines never run off the bottom of the card."""
+    size = start_size
+    while size >= min_size:
+        font = ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+        line_h = int(size * 1.18)
+        lines = _wrap_lines(draw, text, font, max_width)
+        if len(lines) * line_h <= max_height:
+            return font, lines, line_h
+        size -= 4
+    font = ImageFont.truetype(font_path, min_size) if font_path else ImageFont.load_default()
+    line_h = int(min_size * 1.18)
+    return font, _wrap_lines(draw, text, font, max_width), line_h
+
+
+def build_card_image(image_url, label, headline, highlight, category):
+    """Composites the branded card. Raises on failure -- callers should
+    catch and fall back to the plain source image rather than lose the
+    notification over a design step."""
+    font_path = ensure_font()
+    bg_bytes = requests.get(image_url, timeout=10).content
+    bg = Image.open(io.BytesIO(bg_bytes)).convert("RGB")
+    bg = ImageOps.fit(bg, (CARD_W, CARD_H), method=Image.LANCZOS)
+
+    gradient = Image.new("L", (1, CARD_H), 0)
+    for y in range(CARD_H):
+        t = max(0, (y - CARD_H * 0.32) / (CARD_H * 0.68))
+        gradient.putpixel((0, y), int(255 * min(1, t) * 0.93))
+    gradient = gradient.resize((CARD_W, CARD_H))
+    overlay = Image.new("RGBA", (CARD_W, CARD_H), BRAND_NAVY + (0,))
+    overlay.putalpha(gradient)
+    card = Image.alpha_composite(bg.convert("RGBA"), overlay)
+    draw = ImageDraw.Draw(card)
+
+    brand_font = ImageFont.truetype(font_path, 30) if font_path else ImageFont.load_default()
+    label_font = ImageFont.truetype(font_path, 32) if font_path else ImageFont.load_default()
+
+    draw.text((50, 60), BRAND_NAME, font=brand_font, fill=CARD_WHITE)
+    draw.text((50, 100), category.upper(), font=label_font, fill=BRAND_AMBER)
+
+    bottom_margin = 90
+    max_text_zone_h = CARD_H - bottom_margin - 220  # leaves room for the pill above it
+    font, lines, line_h = _fit_headline(draw, headline, font_path, CARD_W - 100, max_text_zone_h)
+    block_h = len(lines) * line_h
+    text_start_y = CARD_H - bottom_margin - block_h
+
+    pill_h = 62
+    pill_y = text_start_y - pill_h - 24
+    pill_w = draw.textlength(label, font=label_font) + 50
+    draw.rounded_rectangle([50, pill_y, 50 + pill_w, pill_y + pill_h], radius=12, fill=BRAND_AMBER)
+    draw.text((75, pill_y + 13), label, font=label_font, fill=BRAND_NAVY)
+
+    highlight_words = set(w.strip(".,:;!?$").lower() for w in (highlight.split() if highlight else []))
+    y = text_start_y
+    for line in lines:
+        cx = 50
+        for w in line:
+            color = BRAND_AMBER if w.strip(".,:;!?$").lower() in highlight_words else CARD_WHITE
+            draw.text((cx, y), w, font=font, fill=color)
+            cx += draw.textlength(w + " ", font=font)
+        y += line_h
+
+    buf = io.BytesIO()
+    card.convert("RGB").save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return buf
+# ====================================================================
+
+
 _last_groq_call = 0.0  # tracks pacing between API calls, keeps us under the free rate limit
 
 
@@ -301,7 +419,7 @@ if it would otherwise qualify:
 {recent_block}
 
 Output ONLY this JSON shape, nothing else:
-{{"significant": true or false, "label": "...", "headline": "..."}}
+{{"significant": true or false, "label": "...", "headline": "...", "highlight": "..."}}
 
 If significant is true:
 - Choose "label" to match how big the story actually is -- vary it, don't
@@ -319,7 +437,11 @@ If significant is true:
   Secretary..."). Most headlines should have NO emoji at all -- don't add a
   flag just to have one, and never use generic symbolic emoji like 🚨 or 📈.
   Do not editorialize or exaggerate beyond what the source supports.
-If significant is false, set label and headline to empty strings."""
+- "highlight" is the single most impactful word or short phrase copied
+  VERBATIM from within "headline" (a number, dollar amount, name, or the
+  key outcome) -- used to visually pick it out on the card. Keep it short
+  (1-5 words). If nothing stands out clearly, repeat the first few words.
+If significant is false, set label, headline, and highlight to empty strings."""
 
     resp = _groq_request({
         "model": GROQ_MODEL,
@@ -337,7 +459,7 @@ If significant is false, set label and headline to empty strings."""
     try:
         result = json.loads(text)
     except json.JSONDecodeError:
-        return {"significant": False, "label": "", "headline": ""}
+        return {"significant": False, "label": "", "headline": "", "highlight": ""}
 
     if result.get("significant"):
         label = str(result.get("label", "")).strip().upper()
@@ -345,10 +467,17 @@ If significant is false, set label and headline to empty strings."""
     return result
 
 
-def send_telegram(text, image_url=None):
+def send_telegram(text, image_url=None, image_bytes=None):
     base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     try:
-        if image_url:
+        if image_bytes:
+            r = requests.post(
+                f"{base}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": text[:1024]},
+                files={"photo": ("card.jpg", image_bytes, "image/jpeg")},
+                timeout=20,
+            )
+        elif image_url:
             r = requests.post(
                 f"{base}/sendPhoto",
                 data={"chat_id": TELEGRAM_CHAT_ID, "photo": image_url, "caption": text[:1024]},
@@ -425,7 +554,20 @@ def run():
                     image = extract_image(entry, category, link)
                     post_text = f"{result['label']}: {result['headline']}"
                     message = f"{post_text}\n\n(reply with source: {link})"
-                    send_telegram(message, image)
+
+                    card_bytes = None
+                    if image:
+                        try:
+                            card_bytes = build_card_image(
+                                image, result["label"], result["headline"], result.get("highlight", ""), category)
+                        except Exception as e:
+                            print(f"[!] Card generation failed, sending plain image instead: {e}")
+
+                    if card_bytes:
+                        send_telegram(message, image_bytes=card_bytes)
+                    else:
+                        send_telegram(message, image_url=image)
+
                     print(f"[{datetime.now()}] Notified ({category}){' [catch-up]' if relaxed else ''}: "
                           f"{result['label']}: {result['headline']}")
                     recent.append({"headline": result["headline"], "ts": time.time()})
@@ -440,4 +582,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-   
