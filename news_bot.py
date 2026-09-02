@@ -82,9 +82,15 @@ GROQ_MODEL = "openai/gpt-oss-120b"        # free tier, no card required
 GROQ_MIN_SECONDS_BETWEEN_CALLS = 4.5
 MAX_RECENT_HEADLINES_IN_PROMPT = 15   # bounds prompt size so token usage can't creep up over the day
 
-ENTRIES_PER_FEED_CHECKED = 15   # newest N entries looked at per feed each run
-                                 # (higher than a continuous-poller needs, since
-                                 # this only runs once per schedule interval)
+ENTRIES_PER_FEED_CHECKED = 12    # newest N entries looked at per feed each run
+                                  # (higher than a continuous-poller needs, since
+                                  # this only runs once per schedule interval)
+ENTRIES_PER_FEED_OVERRIDES = {
+    # BBC/Al Jazeera cover all news, not just our niches -- most of what they
+    # publish was never going to pass the significance bar, so it's not worth
+    # spending a Groq call (and daily quota) on as much of their volume.
+    "international": 6,
+}
 MAX_ARTICLE_AGE_HOURS = 24       # skip anything older than this, so alerts stay
                                   # same-day -- lower this (e.g. to 6) for a
                                   # tighter "right now" feel
@@ -305,8 +311,8 @@ def build_card_image(image_url, label, headline, highlight, category):
     resp = requests.get(image_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     content_type = resp.headers.get("Content-Type", "")
-    if not content_type.startswith("image/"):
-        raise ValueError(f"not an image (Content-Type: {content_type or 'unknown'})")
+    if content_type and not content_type.startswith("image/") and "octet-stream" not in content_type:
+        raise ValueError(f"not an image (Content-Type: {content_type})")
     bg = Image.open(io.BytesIO(resp.content)).convert("RGB")
     bg = ImageOps.fit(bg, (CARD_W, CARD_H), method=Image.LANCZOS)
 
@@ -528,7 +534,8 @@ def run():
                 print(f"[!] Failed to fetch {url}: {e}")
                 continue
 
-            for entry in parsed.entries[:ENTRIES_PER_FEED_CHECKED]:
+            entry_limit = ENTRIES_PER_FEED_OVERRIDES.get(category, ENTRIES_PER_FEED_CHECKED)
+            for entry in parsed.entries[:entry_limit]:
                 aid = article_id(entry)
                 if aid in seen:
                     continue
