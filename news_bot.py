@@ -66,6 +66,7 @@ import calendar
 import hashlib
 import os
 import io
+import random
 from datetime import datetime, timezone
 from urllib.parse import urljoin
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -243,11 +244,12 @@ def extract_image(entry, category, link):
 
 # ======================= BRANDED CARD IMAGE =======================
 # Turns the raw article image into a designed card: your photo as the
-# background, a dark gradient for legibility, your wordmark, a label pill,
-# and a bold word-wrapped headline with the key phrase picked out in your
-# accent color -- the same genre as Watcher.Guru/Bitcoin Magazine-style cards.
-BRAND_NAME = "APEX WIRE"          # <-- change this if you land on a different name
-CARD_W, CARD_H = 1080, 1920       # Facebook Story size; still reads fine in an X/FB feed
+# background, a dark gradient for legibility, your wordmark, and a bold
+# word-wrapped headline with the key phrase picked out in your accent color.
+# Rotates between 3 distinct layouts so consecutive posts don't look
+# identical -- same genre as Watcher.Guru/Bitcoin Magazine-style cards.
+BRAND_NAME = "FAST BUCKZ"          # <-- change this if you rename the account
+CARD_W, CARD_H = 1080, 1350        # standard Facebook/Instagram feed portrait (4:5)
 BRAND_NAVY = (16, 26, 46)
 BRAND_AMBER = (251, 191, 36)
 CARD_WHITE = (255, 255, 255)
@@ -257,20 +259,24 @@ FONT_PATH = "Anton-Regular.ttf"
 
 
 def ensure_font():
-    """Downloads the display font once and reuses it; falls back to PIL's
-    built-in font if the download ever fails, so a font hiccup never kills
-    a notification -- it just looks plainer."""
+    """Downloads the display font once and reuses it; retries a couple of
+    times since this run's whole visual quality depends on it, and only
+    falls back to PIL's plain built-in font if all attempts fail."""
     if os.path.exists(FONT_PATH):
         return FONT_PATH
-    try:
-        r = requests.get(FONT_URL, timeout=15)
-        r.raise_for_status()
-        with open(FONT_PATH, "wb") as f:
-            f.write(r.content)
-        return FONT_PATH
-    except requests.RequestException as e:
-        print(f"[!] Could not download display font, using a plainer fallback: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            r = requests.get(FONT_URL, timeout=15)
+            r.raise_for_status()
+            with open(FONT_PATH, "wb") as f:
+                f.write(r.content)
+            return FONT_PATH
+        except requests.RequestException as e:
+            if attempt == 2:
+                print(f"[!] Could not download display font after 3 tries, using a plainer fallback: {e}")
+            else:
+                time.sleep(2)
+    return None
 
 
 def _wrap_lines(draw, text, font, max_width):
@@ -287,7 +293,7 @@ def _wrap_lines(draw, text, font, max_width):
     return lines
 
 
-def _fit_headline(draw, text, font_path, max_width, max_height, start_size=64, min_size=38):
+def _fit_headline(draw, text, font_path, max_width, max_height, start_size=64, min_size=32):
     """Shrinks the font until the wrapped headline fits the available box,
     so long headlines never run off the bottom of the card."""
     size = start_size
@@ -303,10 +309,111 @@ def _fit_headline(draw, text, font_path, max_width, max_height, start_size=64, m
     return font, _wrap_lines(draw, text, font, max_width), line_h
 
 
+def _draw_highlighted(draw, lines, font, start_x, start_y, line_h, highlight_words):
+    y = start_y
+    for line in lines:
+        cx = start_x
+        for w in line:
+            color = BRAND_AMBER if w.strip(".,:;!?$").lower() in highlight_words else CARD_WHITE
+            draw.text((cx, y), w, font=font, fill=color)
+            cx += draw.textlength(w + " ", font=font)
+        y += line_h
+    return y
+
+
+def _gradient_card(bg, start_frac, strength=0.93):
+    """Composites a dark gradient over the background photo, transparent
+    above start_frac (as a fraction of height) and solid brand-navy below."""
+    gradient = Image.new("L", (1, CARD_H), 0)
+    for y in range(CARD_H):
+        t = max(0, (y - CARD_H * start_frac) / (CARD_H * (1 - start_frac)))
+        gradient.putpixel((0, y), int(255 * min(1, t) * strength))
+    gradient = gradient.resize((CARD_W, CARD_H))
+    overlay = Image.new("RGBA", (CARD_W, CARD_H), BRAND_NAVY + (0,))
+    overlay.putalpha(gradient)
+    return Image.alpha_composite(bg.convert("RGBA"), overlay)
+
+
+def _layout_pill(draw, font_path, label, headline, highlight, category):
+    """Wordmark + category top-left, colored label pill, bottom-anchored headline."""
+    brand_font = ImageFont.truetype(font_path, 28) if font_path else ImageFont.load_default()
+    label_font = ImageFont.truetype(font_path, 30) if font_path else ImageFont.load_default()
+    draw.text((50, 50), BRAND_NAME, font=brand_font, fill=CARD_WHITE)
+    draw.text((50, 88), category.upper(), font=label_font, fill=BRAND_AMBER)
+
+    bottom_margin = 70
+    max_h = CARD_H - bottom_margin - 170
+    font, lines, line_h = _fit_headline(draw, headline, font_path, CARD_W - 100, max_h, start_size=56)
+    block_h = len(lines) * line_h
+    text_y = CARD_H - bottom_margin - block_h
+
+    pill_h = 56
+    pill_y = text_y - pill_h - 20
+    pill_w = draw.textlength(label, font=label_font) + 44
+    draw.rounded_rectangle([50, pill_y, 50 + pill_w, pill_y + pill_h], radius=10, fill=BRAND_AMBER)
+    draw.text((72, pill_y + 11), label, font=label_font, fill=BRAND_NAVY)
+
+    hw = set(w.strip(".,:;!?$").lower() for w in (highlight.split() if highlight else []))
+    _draw_highlighted(draw, lines, font, 50, text_y, line_h, hw)
+
+
+def _layout_divider(draw, font_path, label, headline, highlight, category):
+    """Centered category label flanked by rule lines, label folded into the
+    highlighted headline text itself instead of a separate pill."""
+    brand_font = ImageFont.truetype(font_path, 24) if font_path else ImageFont.load_default()
+    cat_font = ImageFont.truetype(font_path, 28) if font_path else ImageFont.load_default()
+    draw.text((50, 45), BRAND_NAME, font=brand_font, fill=CARD_WHITE)
+
+    cat_text = category.upper()
+    cat_w = draw.textlength(cat_text, font=cat_font)
+    cat_y = CARD_H * 0.58
+    cx = (CARD_W - cat_w) / 2
+    draw.text((cx, cat_y), cat_text, font=cat_font, fill=BRAND_AMBER)
+    line_y = cat_y + 18
+    draw.line([(60, line_y), (cx - 30, line_y)], fill=BRAND_AMBER, width=3)
+    draw.line([(cx + cat_w + 30, line_y), (CARD_W - 60, line_y)], fill=BRAND_AMBER, width=3)
+
+    bottom_margin = 70
+    text_top = cat_y + 50
+    max_h = CARD_H - bottom_margin - text_top
+    full_text = f"{label} {headline}"
+    font, lines, line_h = _fit_headline(draw, full_text, font_path, CARD_W - 100, max_h, start_size=52)
+    hw = set(w.strip(".,:;!?$").lower() for w in (label.split() + (highlight.split() if highlight else [])))
+    _draw_highlighted(draw, lines, font, 50, text_top, line_h, hw)
+
+
+def _layout_minimal(draw, font_path, label, headline, highlight, category):
+    """Smaller, more restrained editorial look: plain label+category tag,
+    modest headline size, wordmark tucked bottom-right."""
+    tag_font = ImageFont.truetype(font_path, 24) if font_path else ImageFont.load_default()
+    brand_font = ImageFont.truetype(font_path, 22) if font_path else ImageFont.load_default()
+
+    tag_text = f"{label} \u00b7 {category.upper()}"
+    tag_y = CARD_H - 230
+    draw.text((50, tag_y), tag_text, font=tag_font, fill=BRAND_AMBER)
+
+    bottom_margin = 75
+    text_top = tag_y + 36
+    max_h = CARD_H - bottom_margin - text_top
+    font, lines, line_h = _fit_headline(draw, headline, font_path, CARD_W - 100, max_h, start_size=42)
+    hw = set(w.strip(".,:;!?$").lower() for w in (highlight.split() if highlight else []))
+    _draw_highlighted(draw, lines, font, 50, text_top, line_h, hw)
+
+    bw = draw.textlength(BRAND_NAME, font=brand_font)
+    draw.text((CARD_W - bw - 50, CARD_H - 48), BRAND_NAME, font=brand_font, fill=CARD_WHITE)
+
+
+CARD_LAYOUTS = [
+    (_layout_pill, 0.32),      # (layout function, gradient start fraction)
+    (_layout_divider, 0.28),
+    (_layout_minimal, 0.55),
+]
+
+
 def build_card_image(image_url, label, headline, highlight, category):
-    """Composites the branded card. Raises on failure -- callers should
-    catch and fall back to the plain source image rather than lose the
-    notification over a design step."""
+    """Composites the branded card using a randomly-picked layout. Raises on
+    failure -- callers should catch and fall back to the plain source image
+    rather than lose the notification over a design step."""
     font_path = ensure_font()
     resp = requests.get(image_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
@@ -316,46 +423,13 @@ def build_card_image(image_url, label, headline, highlight, category):
     bg = Image.open(io.BytesIO(resp.content)).convert("RGB")
     bg = ImageOps.fit(bg, (CARD_W, CARD_H), method=Image.LANCZOS)
 
-    gradient = Image.new("L", (1, CARD_H), 0)
-    for y in range(CARD_H):
-        t = max(0, (y - CARD_H * 0.32) / (CARD_H * 0.68))
-        gradient.putpixel((0, y), int(255 * min(1, t) * 0.93))
-    gradient = gradient.resize((CARD_W, CARD_H))
-    overlay = Image.new("RGBA", (CARD_W, CARD_H), BRAND_NAVY + (0,))
-    overlay.putalpha(gradient)
-    card = Image.alpha_composite(bg.convert("RGBA"), overlay)
+    layout_fn, gradient_start = random.choice(CARD_LAYOUTS)
+    card = _gradient_card(bg, gradient_start)
     draw = ImageDraw.Draw(card)
-
-    brand_font = ImageFont.truetype(font_path, 30) if font_path else ImageFont.load_default()
-    label_font = ImageFont.truetype(font_path, 32) if font_path else ImageFont.load_default()
-
-    draw.text((50, 60), BRAND_NAME, font=brand_font, fill=CARD_WHITE)
-    draw.text((50, 100), category.upper(), font=label_font, fill=BRAND_AMBER)
-
-    bottom_margin = 90
-    max_text_zone_h = CARD_H - bottom_margin - 220  # leaves room for the pill above it
-    font, lines, line_h = _fit_headline(draw, headline, font_path, CARD_W - 100, max_text_zone_h)
-    block_h = len(lines) * line_h
-    text_start_y = CARD_H - bottom_margin - block_h
-
-    pill_h = 62
-    pill_y = text_start_y - pill_h - 24
-    pill_w = draw.textlength(label, font=label_font) + 50
-    draw.rounded_rectangle([50, pill_y, 50 + pill_w, pill_y + pill_h], radius=12, fill=BRAND_AMBER)
-    draw.text((75, pill_y + 13), label, font=label_font, fill=BRAND_NAVY)
-
-    highlight_words = set(w.strip(".,:;!?$").lower() for w in (highlight.split() if highlight else []))
-    y = text_start_y
-    for line in lines:
-        cx = 50
-        for w in line:
-            color = BRAND_AMBER if w.strip(".,:;!?$").lower() in highlight_words else CARD_WHITE
-            draw.text((cx, y), w, font=font, fill=color)
-            cx += draw.textlength(w + " ", font=font)
-        y += line_h
+    layout_fn(draw, font_path, label, headline, highlight, category)
 
     buf = io.BytesIO()
-    card.convert("RGB").save(buf, format="JPEG", quality=90)
+    card.convert("RGB").save(buf, format="JPEG", quality=95)
     buf.seek(0)
     return buf
 # ====================================================================
